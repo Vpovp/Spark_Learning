@@ -357,170 +357,248 @@ Without partitioning, Spark would lose its biggest advantage: distributed comput
 ## Coalesce
 >## What is coalesce in spark
 
-Answer:
+## 🔹 Understanding `coalesce` in Spark (with Executors + Diagrams)
 
-Let’s take a clear example with executors + partitions so you understand exactly how coalesce behaves.
+`coalesce(n)` reduces the number of partitions **without full shuffle**.  
+It tries to **merge partitions locally (within the same executor)** first, and only does minimal data movement if required.
 
---------------------------------------------------
-
-Initial Setup:
-
-Assume:
-- 6 partitions → P0, P1, P2, P3, P4, P5
-- 3 executors → E1, E2, E3
-
-Data distribution:
-
-E1 → P0 (100 rows), P1 (200 rows)  
-E2 → P2 (50 rows),  P3 (150 rows)  
-E3 → P4 (300 rows), P5 (100 rows)
-
---------------------------------------------------
-
-Important Rule:
-
-coalesce DOES NOT reshuffle evenly  
-It tries to merge partitions mostly within same executor (to avoid data movement)
-
---------------------------------------------------
-
-Case 1: coalesce(3)
-
-Goal: Reduce 6 → 3 partitions
-
-Likely behavior:
-
-E1:
-  P0 + P1 → New Partition NP0 (300 rows)
-
-E2:
-  P2 + P3 → New Partition NP1 (200 rows)
-
-E3:
-  P4 + P5 → New Partition NP2 (400 rows)
-
-Result:
-NP0 → 300 rows  
-NP1 → 200 rows  
-NP2 → 400 rows  
-
-✔ No shuffle  
-✔ Each executor merged its own partitions  
-
---------------------------------------------------
-
-Case 2: coalesce(2)
-
-Goal: Reduce 6 → 2 partitions
-
-Now Spark has to reduce more aggressively.
-
-Possible behavior:
-
-E1:
-  P0 + P1 → Temp (300 rows)
-
-E2:
-  P2 + P3 → Temp (200 rows)
-
-E3:
-  P4 + P5 → Temp (400 rows)
-
-Now merging further (minimal movement):
-
-NP0 → (E1 + E2) → 300 + 200 = 500 rows  
-NP1 → (E3) → 400 rows  
-
-Result:
-NP0 → 500 rows  
-NP1 → 400 rows  
-
-⚠ Slight data movement may happen  
-⚠ Still NOT full shuffle  
-⚠ Partitions become uneven  
-
---------------------------------------------------
-
-Case 3: coalesce(4)
-
-Goal: Reduce 6 → 4 partitions
-
-Now fewer merges are needed.
-
-Possible behavior:
-
-NP0 → P0 (100 rows)  
-NP1 → P1 (200 rows)  
-NP2 → P2 + P3 (200 rows)  
-NP3 → P4 + P5 (400 rows)
-
-Result:
-NP0 → 100  
-NP1 → 200  
-NP2 → 200  
-NP3 → 400  
-
-✔ Minimal merging  
-✔ No balancing attempt  
-
---------------------------------------------------
-
-Key Observations:
-
-1. Coalesce prefers LOCAL merging
-- It tries to combine partitions inside same executor first
-
-2. No guarantee of equal size
-- One partition can be huge, another small
-
-3. Minimal data movement
-- That’s why it is fast
-
-4. Executor-level behavior
-- Each executor collapses its own partitions first
-- Cross-executor merge happens only if required
-
---------------------------------------------------
-
-What Spark DOES NOT do in coalesce:
-
-❌ It does NOT rebalance data evenly  
-❌ It does NOT hash or reshuffle all data  
-❌ It does NOT guarantee equal partitions  
-
---------------------------------------------------
-
-Simple Visualization:
-
-Before:
-[P0][P1]   [P2][P3]   [P4][P5]
-  E1         E2         E3
-
-After coalesce(3):
-[ P0+P1 ] [ P2+P3 ] [ P4+P5 ]
-
-After coalesce(2):
-[ P0+P1+P2+P3 ]   [ P4+P5 ]
-
---------------------------------------------------
-
-When this matters:
-
-- Writing output files → fewer files
-- After filtering → data reduced
-- Avoid shuffle → better performance
-
---------------------------------------------------
-
-Summary:
-
-coalesce works by collapsing nearby partitions (usually within the same executor), minimizing data movement. The exact merging depends on where partitions are located, but Spark avoids full reshuffling, which makes it fast but uneven.
 ---
 
+## 🔸 Initial Setup
+
+We start with:
+
+- **6 partitions** → P0, P1, P2, P3, P4, P5  
+- **3 executors** → E1, E2, E3  
+
+### Data Distribution:
+
+| Executor | Partitions        | Rows |
+|----------|------------------|------|
+| E1       | P0, P1           | 100, 200 |
+| E2       | P2, P3           | 50, 150 |
+| E3       | P4, P5           | 300, 100 |
+
+---
+
+## ⚙️ Key Rule (Very Important)
+
+- Spark **does NOT rebalance data**
+- Spark **tries to avoid shuffle**
+- Spark **merges partitions inside executor first**
+- Executors will mostly **process their own local data**
+
+---
+
+# 🔹 CASE 1: `coalesce(4)`
+
+👉 Goal: Reduce 6 → 4 partitions  
+👉 Minimal merging required
+
+---
+
+### 🧠 Executor Behavior:
+
+- E1 keeps P0, P1 as-is (no need to merge both)
+- E2 merges P2 + P3
+- E3 merges P4 + P5
+
+---
+
+### 📊 Diagram:
+
 ```mermaid
-  graph TD;
-      A-->B;
-      A-->C;
-      B-->D;
-      C-->D;
+flowchart LR
+
+subgraph E1
+P0[P0:100]
+P1[P1:200]
+end
+
+subgraph E2
+P2[P2:50]
+P3[P3:150]
+end
+
+subgraph E3
+P4[P4:300]
+P5[P5:100]
+end
+
+subgraph After_coalesce_4
+NP0[NP0:100]
+NP1[NP1:200]
+NP2[NP2:200]
+NP3[NP3:400]
+end
+
+P0 --> NP0
+P1 --> NP1
+P2 --> NP2
+P3 --> NP2
+P4 --> NP3
+P5 --> NP3
 ```
+
+# 🔹 CASE 1: `coalesce(3)`
+
+```mermaid
+flowchart LR
+
+subgraph E1
+P0[P0]
+P1[P1]
+end
+
+subgraph E2
+P2[P2]
+P3[P3]
+end
+
+subgraph E3
+P4[P4]
+P5[P5]
+end
+
+subgraph After_coalesce_3
+NP0[NP0:300]
+NP1[NP1:200]
+NP2[NP2:400]
+end
+
+P0 --> NP0
+P1 --> NP0
+
+P2 --> NP1
+P3 --> NP1
+
+P4 --> NP2
+P5 --> NP2
+```
+
+---
+
+
+>## what is exchange , 
+haspartitioning,hashaggregate
+
+Answer:
+
+These terms come from Spark’s **physical query plan** (what you see in `explain()` output).  
+They describe how Spark is actually executing your query.
+
+---
+
+# 🔹 1. Exchange
+
+## 👉 What it means:
+
+`Exchange` = **Shuffle (data movement across executors)**
+
+---
+
+## 🔸 Why it happens:
+
+Spark inserts `Exchange` when it needs to:
+- Repartition data
+- Bring same keys together
+- Change partitioning strategy
+
+---
+
+## 🔸 Example:
+
+```python
+df.groupBy("user_id").count()
+```
+Physical plan may show:
+
+Exchange hashpartitioning(user_id, 200)
+🧠 What Spark is doing:
+Compute:
+partition_id = hash(user_id) % 200
+Move rows across network
+Ensure same user_id is in same partition
+
+Important:
+This is EXPENSIVE
+Involves network I/O
+Happens in joins, groupBy, distinct
+
+---
+
+# 2. hashpartitioning (you wrote haspartitioning)
+👉 What it means:
+
+## hashpartitioning(col, N) =
+👉 Data is partitioned using hash of a column into N partitions.
+
+## 🔸 Formula:
+partition_id = hash(col) % N
+## 🔸 Example:
+hashpartitioning(user_id, 4)
+
+Means:
+
+Spark will create 4 partitions
+Rows distributed based on user_id
+
+## 🧠 Why it is used:
+Ensures same keys go to same partition
+Required for:
+joins
+groupBy
+aggregations
+## 📊 Example:
+user_id = [101, 102, 101, 103]
+
+Result:
+
+Partition 0 → 102  
+Partition 1 → 101, 101, 103  
+
+
+---
+
+## 🔹 3. HashAggregate
+👉 What it means:
+
+## HashAggregate =
+👉 Spark is using a hash table to perform aggregation
+
+## 🔸 Example:
+df.groupBy("user_id").count()
+
+Plan:
+
+HashAggregate(keys=[user_id], functions=[count])
+## 🧠 How it works:
+
+Inside each partition:
+
+Create a hash map:
+user_id → count
+Iterate rows:
+101 → count++
+102 → count++
+## 🔸 Two-Phase Aggregation (VERY IMPORTANT)
+
+Spark usually does:
+
+1. Partial Aggregation (before shuffle)
+HashAggregate (partial)
+
+Each partition computes local counts
+
+2. Exchange (shuffle)
+
+Bring same keys together
+
+3. Final Aggregation
+HashAggregate (final)
+
+Merge partial results
+
+---
+## Image for reference.
+![alt text](image.png)
